@@ -44,7 +44,7 @@ async def handle_webhook(request: Request):
         last_entry = context_list[-1]
         current_msg_val = next(iter(last_entry.values()))
 
-        # Determine message type
+        # Determine message type from the CURRENT message
         msg_type = 'text'
         if isinstance(current_msg_val, dict):
             msg_type = current_msg_val.get('type', 'text')
@@ -62,17 +62,19 @@ async def handle_webhook(request: Request):
 
             if image_url:
                 logger.info(f"📷 Analyzing Image: {image_url}")
-                response = requests.get(image_url, timeout=5)
-                
-                if response.status_code == 200:
-                    try:
+                try:
+                    response = requests.get(image_url, timeout=10)
+                    
+                    if response.status_code == 200:
+                        # Analyze the actual image content
                         request_options = AnalyzeImageOptions(image=ImageData(content=response.content))
                         result = client.analyze_image(request_options)
                         violation_found, reason_msg = check_safety(result, block_level=2)
-                    except HttpResponseError as e:
-                        logger.error(f"Azure Image Analysis Error: {e}")
-                else:
-                    logger.warning(f"Could not download image (HTTP {response.status_code})")
+                    else:
+                        logger.warning(f"Could not download image (HTTP {response.status_code})")
+                        
+                except Exception as e:
+                    logger.error(f"Image download/analysis error: {e}")
             else:
                 logger.warning("⚠️ Image type detected but no URL found")
 
@@ -114,11 +116,21 @@ async def handle_webhook(request: Request):
                 elif isinstance(val, dict):
                     entry_type = val.get('type', 'text')
                     
-                    # Only extract text from text-type messages
+                    # CRITICAL FIX: Only extract text from text-type messages
                     # Skip images, files, audio, video, etc.
                     if entry_type == 'text':
-                        text_content = val.get('data', {}).get('text', '')
-                        if text_content:
+                        # Look for text in the 'data' object
+                        data_obj = val.get('data', {})
+                        
+                        # Handle both string and object formats
+                        if isinstance(data_obj, str):
+                            text_content = data_obj
+                        elif isinstance(data_obj, dict):
+                            text_content = data_obj.get('text', '')
+                        else:
+                            text_content = ''
+                        
+                        if text_content and text_content.strip():
                             combined_text += text_content + "\n"
                             text_messages_count += 1
 
@@ -128,10 +140,10 @@ async def handle_webhook(request: Request):
                 
                 try:
                     # Azure has a 10,000 character limit for text analysis
-                    truncated_text = combined_text[:1000]
+                    truncated_text = combined_text[:10000]
                     
-                    if len(combined_text) > 1000:
-                        logger.warning(f"⚠️ Text truncated from {len(combined_text)} to 10,00 chars")
+                    if len(combined_text) > 10000:
+                        logger.warning(f"⚠️ Text truncated from {len(combined_text)} to 10,000 chars")
                     
                     request_options = AnalyzeTextOptions(text=truncated_text)
                     result = client.analyze_text(request_options)
