@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def check_safety(analysis_result, block_level):
-    """Simple helper to check if severity is too high."""
+    """Check if any category exceeds the severity threshold."""
     for item in analysis_result.categories_analysis:
         if item.severity >= block_level:
             return True, f"{item.category} (Level {item.severity})"
@@ -40,108 +40,129 @@ async def handle_webhook(request: Request):
         if not context_list:
             return {"isMatchingCondition": False}
 
-        # 1. Get the current message safely
+        # Get the current message (last in the array)
         last_entry = context_list[-1]
-        
-        # The entry looks like: { "uid_123": { "type": "image", ... } }
-        # We need to get that inner dictionary.
         current_msg_val = next(iter(last_entry.values()))
 
-        # 2. Determine Type (The Critical Fix)
+        # Determine message type
         msg_type = 'text'
         if isinstance(current_msg_val, dict):
-            # Try to find 'type' in the top level
             msg_type = current_msg_val.get('type', 'text')
-            
-            # If not found, sometimes it's nested in 'data' (rare but possible)
-            if 'data' in current_msg_val and isinstance(current_msg_val['data'], dict):
-                 if 'type' in current_msg_val['data']:
-                     msg_type = current_msg_val['data']['type']
 
-        logger.info(f"🔍 Detected Message Type: {msg_type}")
+        logger.info(f"🔍 Message Type: {msg_type} | Context Window: {len(context_list)} messages")
 
         violation_found = False
         reason_msg = ""
 
         # ==========================================
-        # 📷 OPTION A: IMAGE MODERATION
+        # 📷 IMAGE MODERATION (Current Image Only)
         # ==========================================
         if msg_type == 'image' and isinstance(current_msg_val, dict):
-            # Extract URL
             image_url = current_msg_val.get('data', {}).get('url')
-            
-            # Fallback: Sometimes URL is inside 'entities' or other fields
-            if not image_url and 'data' in current_msg_val:
-                 # Print structure to debug if URL is missing
-                 # logger.info(f"Debug Image Data: {current_msg_val['data']}") 
-                 pass
 
             if image_url:
-                logger.info(f"📷 Analyzing Image URL: {image_url}")
-                response = requests.get(image_url)
+                logger.info(f"📷 Analyzing Image: {image_url}")
+                response = requests.get(image_url, timeout=5)
                 
                 if response.status_code == 200:
                     try:
-                        # Send raw bytes to Azure
                         request_options = AnalyzeImageOptions(image=ImageData(content=response.content))
                         result = client.analyze_image(request_options)
-                        
-                        # STRICT Rule for Images (Level 2 blocks Nudity)
                         violation_found, reason_msg = check_safety(result, block_level=2)
-                        
                     except HttpResponseError as e:
-                        logger.error(f"Azure Error: {e}")
+                        logger.error(f"Azure Image Analysis Error: {e}")
                 else:
-                    logger.warning("Could not download image")
+                    logger.warning(f"Could not download image (HTTP {response.status_code})")
             else:
-                 logger.warning("⚠️ Received 'image' type but could not find 'url' in data.")
+                logger.warning("⚠️ Image type detected but no URL found")
+
+            # RETURN immediately after image analysis
+            logger.info(f"⏱️ Processing Time: {time.time() - start_time:.2f}s")
+            
+            if violation_found:
+                logger.warning(f"🚫 BLOCKED IMAGE: {reason_msg}")
+                return {
+                    "isMatchingCondition": True,
+                    "confidence": 0.95,
+                    "reason": reason_msg
+                }
+            
+            logger.info("✅ Image Safe")
+            return {
+                "isMatchingCondition": False,
+                "confidence": 0.98,
+                "reason": "Image is safe"
+            }
 
         # ==========================================
-        # 💬 OPTION B: TEXT MODERATION
+        # 💬 TEXT MODERATION (All Context Messages)
         # ==========================================
         else:
             combined_text = ""
-            # Loop through history safely
+            text_messages_count = 0
+            
+            # Extract text from ALL messages in the context window
             for entry in context_list:
                 val = next(iter(entry.values()))
+                
+                # Handle string messages (legacy format)
                 if isinstance(val, str):
-                    combined_text += f"{val}. "
+                    combined_text += val + "\n"
+                    text_messages_count += 1
+                
+                # Handle structured messages
                 elif isinstance(val, dict):
-                    # Try to find text in 'data' -> 'text'
-                    text_part = val.get('data', {}).get('text', '')
-                    if text_part:
-                        combined_text += f"{text_part}. "
+                    entry_type = val.get('type', 'text')
                     
-                    # If that's empty, maybe it's a file name? (Don't analyze file metadata as text)
-                    elif val.get('type') == 'file' or val.get('type') == 'image':
-                         continue # Skip metadata for images/files in text analysis
+                    # Only extract text from text-type messages
+                    # Skip images, files, audio, video, etc.
+                    if entry_type == 'text':
+                        text_content = val.get('data', {}).get('text', '')
+                        if text_content:
+                            combined_text += text_content + "\n"
+                            text_messages_count += 1
 
             if combined_text.strip():
-                logger.info(f"🧐 Analyzing Text: {combined_text[:50]}...")
+                logger.info(f"🧐 Analyzing {text_messages_count} text messages from context")
+                logger.info(f"📝 Combined Text Preview: {combined_text[:100]}...")
+                
                 try:
-                    request_options = AnalyzeTextOptions(text=combined_text[:1000])
-                    result = client.analyze_text(request_options)
+                    # Azure has a 10,000 character limit for text analysis
+                    truncated_text = combined_text[:1000]
                     
-                    # STANDARD Rule for Text (Level 4 blocks Hate/Violence)
-                    violation_found, reason_msg = check_safety(result, block_level=4)
+                    if len(combined_text) > 1000:
+                        logger.warning(f"⚠️ Text truncated from {len(combined_text)} to 10,00 chars")
+                    
+                    request_options = AnalyzeTextOptions(text=truncated_text)
+                    result = client.analyze_text(request_options)
+                    violation_found, reason_msg = check_safety(result, block_level=2)
                     
                 except HttpResponseError as e:
-                    logger.error(f"Azure Error: {e}")
+                    logger.error(f"Azure Text Analysis Error: {e}")
+            else:
+                logger.info("ℹ️ No text content found in context messages")
 
-        # ==========================================
-        # 🏁 RESULT
-        # ==========================================
-        logger.info(f"⏱️ Time: {time.time() - start_time:.2f}s")
-
-        if violation_found:
-            logger.warning(f"🚫 BLOCKED: {reason_msg}")
-            return {"isMatchingCondition": True, "confidence": 100, "reason": reason_msg}
-        
-        logger.info("✅ Safe")
-        return {"isMatchingCondition": False, "confidence": 0, "reason": "Safe"}
+            # RETURN for text analysis
+            logger.info(f"⏱️ Processing Time: {time.time() - start_time:.2f}s")
+            
+            if violation_found:
+                logger.warning(f"🚫 BLOCKED TEXT: {reason_msg}")
+                return {
+                    "isMatchingCondition": True,
+                    "confidence": 0.95,
+                    "reason": reason_msg
+                }
+            
+            logger.info("✅ Text Safe")
+            return {
+                "isMatchingCondition": False,
+                "confidence": 0.98,
+                "reason": "Content is safe"
+            }
 
     except Exception as e:
-        logger.error(f"❌ Critical Error: {e}")
+        logger.error(f"❌ Critical Error: {e}", exc_info=True)
+        # Fail open to prevent blocking good users on server errors
         return {"isMatchingCondition": False}
 
 if __name__ == "__main__":
