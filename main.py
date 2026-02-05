@@ -35,6 +35,10 @@ async def handle_webhook(request: Request):
     start_time = time.time()
     try:
         payload = await request.json()
+        
+        # DEBUG: Log the ENTIRE payload to understand CometChat's format
+        logger.info(f"📦 Full Payload: {payload}")
+        
         context_list = payload.get('contextMessages', [])
         
         if not context_list:
@@ -42,6 +46,8 @@ async def handle_webhook(request: Request):
 
         # Get the current message (last in the array)
         last_entry = context_list[-1]
+        logger.info(f"📨 Last Entry: {last_entry}")
+        
         current_msg_val = next(iter(last_entry.values()))
 
         # DEBUG: Log the actual message structure
