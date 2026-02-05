@@ -44,6 +44,9 @@ async def handle_webhook(request: Request):
         last_entry = context_list[-1]
         current_msg_val = next(iter(last_entry.values()))
 
+        # DEBUG: Log the actual message structure
+        logger.info(f"🔍 Raw message structure: {current_msg_val}")
+
         # Determine message type from the CURRENT message
         msg_type = 'text'
         if isinstance(current_msg_val, dict):
