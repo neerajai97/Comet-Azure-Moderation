@@ -81,7 +81,7 @@ async def handle_webhook(request: Request):
                     result = client.analyze_image(request_options)
                     
                     # Check Severity (Strict Level 4)
-                    violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=4)
+                    violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=2)
                     
                 except HttpResponseError as e:
                     logger.error(f"Azure Image API Failed: {e.error.message if e.error else e}")
@@ -126,7 +126,7 @@ async def handle_webhook(request: Request):
                         # Truncate to 1000 chars for speed
                         request_options = AnalyzeTextOptions(text=extracted_text[:1000])
                         result = client.analyze_text(request_options)
-                        violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=4)
+                        violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=2)
                     except HttpResponseError as e:
                         logger.error(f"Azure Text API Failed: {e}")
 
@@ -148,7 +148,7 @@ async def handle_webhook(request: Request):
             try:
                 request_options = AnalyzeTextOptions(text=combined_text[:1000])
                 result = client.analyze_text(request_options)
-                violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=4)
+                violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=2)
             except HttpResponseError as e:
                  logger.error(f"Azure Text API Failed: {e}")
 
