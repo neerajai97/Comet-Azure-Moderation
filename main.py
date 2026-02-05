@@ -31,7 +31,7 @@ client = ContentSafetyClient(AZURE_ENDPOINT, AzureKeyCredential(AZURE_KEY))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def analyze_severity(categories_analysis, block_level=4):
+def analyze_severity(categories_analysis, block_level=2):
     """
     Helper function to check if any category exceeds the block level.
     """
