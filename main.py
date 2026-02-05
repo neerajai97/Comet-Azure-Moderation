@@ -53,11 +53,15 @@ async def handle_webhook(request: Request):
         if not context_list:
             return {"isMatchingCondition": False}
 
-        # Get Current Message Data
-        current_msg_entry = context_list[-1]
-        sender_uid = next(iter(current_msg_entry))
-        message_object = current_msg_entry[sender_uid]
-        msg_type = message_object.get('type', 'text')
+        # 1. Get Current Message Data
+        last_entry = context_list[-1]
+        sender_uid = next(iter(last_entry))
+        message_object = last_entry[sender_uid]
+        
+        # 🚨 CRITICAL FIX: Check if it is a Dict or String to prevent Attribute Error
+        msg_type = 'text' # Default to text
+        if isinstance(message_object, dict):
+            msg_type = message_object.get('type', 'text')
         
         violation_found = False
         reason_msg = ""
@@ -65,92 +69,98 @@ async def handle_webhook(request: Request):
         # ==========================================
         # 📷 PATH A: IMAGE MODERATION
         # ==========================================
-        if msg_type == 'image':
-            image_url = message_object['data']['url']
-            logger.info(f"📷 Analyzing Image: {image_url}")
+        if msg_type == 'image' and isinstance(message_object, dict):
+            data = message_object.get('data', {})
+            image_url = data.get('url')
             
-            # Download the image
-            response = requests.get(image_url)
-            if response.status_code == 200:
-                try:
-                    # Use Raw Bytes (Matches Azure Docs)
-                    image_data = ImageData(content=response.content)
-                    request_options = AnalyzeImageOptions(image=image_data)
-                    
-                    # Analyze
-                    result = client.analyze_image(request_options)
-                    
-                    # Check Severity (Strict Level 4)
-                    violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=2)
-                    
-                except HttpResponseError as e:
-                    logger.error(f"Azure Image API Failed: {e.error.message if e.error else e}")
-            else:
-                logger.warning("Could not download image from CometChat")
+            if image_url:
+                logger.info(f"📷 Analyzing Image: {image_url}")
+                response = requests.get(image_url)
+                if response.status_code == 200:
+                    try:
+                        # Use Raw Bytes
+                        image_data = ImageData(content=response.content)
+                        request_options = AnalyzeImageOptions(image=image_data)
+                        
+                        # Analyze
+                        result = client.analyze_image(request_options)
+                        
+                        # Check Severity (Level 2 for Images)
+                        violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=2)
+                        
+                    except HttpResponseError as e:
+                        logger.error(f"Azure Image API Failed: {e.error.message if e.error else e}")
+                else:
+                    logger.warning("Could not download image")
 
         # ==========================================
         # 📂 PATH B: FILE MODERATION (PDF / DOCX)
         # ==========================================
-        elif msg_type == 'file':
-            file_url = message_object['data']['url']
-            file_ext = message_object['data'].get('extension', '').lower()
-            logger.info(f"📂 Analyzing File ({file_ext})")
+        elif msg_type == 'file' and isinstance(message_object, dict):
+            data = message_object.get('data', {})
+            file_url = data.get('url')
+            file_ext = data.get('extension', '').lower()
+            
+            if file_url:
+                logger.info(f"📂 Analyzing File ({file_ext})")
 
-            response = requests.get(file_url)
-            if response.status_code == 200:
-                extracted_text = ""
-                file_memory = io.BytesIO(response.content)
-                
-                # Extract Text
-                if 'pdf' in file_ext:
-                    try:
-                        reader = PdfReader(file_memory)
-                        # LIMIT: Only read first 3 pages for speed
-                        for page in reader.pages[:3]: 
-                            extracted_text += page.extract_text() + " "
-                    except Exception as e:
-                        logger.error(f"PDF Error: {e}")
-                elif 'doc' in file_ext:
-                    try:
-                        doc = Document(file_memory)
-                        for para in doc.paragraphs:
-                            extracted_text += para.text + " "
-                    except Exception as e:
-                        logger.error(f"Doc Error: {e}")
-                elif 'txt' in file_ext:
-                    extracted_text = response.text
+                response = requests.get(file_url)
+                if response.status_code == 200:
+                    extracted_text = ""
+                    file_memory = io.BytesIO(response.content)
+                    
+                    # Extract Text
+                    if 'pdf' in file_ext:
+                        try:
+                            reader = PdfReader(file_memory)
+                            # LIMIT: Only read first 3 pages for speed
+                            for page in reader.pages[:3]: 
+                                extracted_text += page.extract_text() + " "
+                        except Exception as e:
+                            logger.error(f"PDF Error: {e}")
+                    elif 'doc' in file_ext:
+                        try:
+                            doc = Document(file_memory)
+                            for para in doc.paragraphs:
+                                extracted_text += para.text + " "
+                        except Exception as e:
+                            logger.error(f"Doc Error: {e}")
+                    elif 'txt' in file_ext:
+                        extracted_text = response.text
 
-                # Send to Azure (if text found)
-                if extracted_text.strip():
-                    try:
-                        # Truncate to 1000 chars for speed
-                        request_options = AnalyzeTextOptions(text=extracted_text[:1000])
-                        result = client.analyze_text(request_options)
-                        violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=2)
-                    except HttpResponseError as e:
-                        logger.error(f"Azure Text API Failed: {e}")
+                    # Send to Azure (if text found)
+                    if extracted_text.strip():
+                        try:
+                            # Truncate to 1000 chars for speed
+                            request_options = AnalyzeTextOptions(text=extracted_text[:1000])
+                            result = client.analyze_text(request_options)
+                            violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=2)
+                        except HttpResponseError as e:
+                            logger.error(f"Azure Text API Failed: {e}")
 
         # ==========================================
-        # 💬 PATH C: TEXT MODERATION (Original Logic)
+        # 💬 PATH C: TEXT MODERATION (Fallback)
         # ==========================================
         else:
             combined_text = ""
+            # Loop safely through mixed Strings and Dicts
             for entry in context_list:
                 for key, value in entry.items():
                     if isinstance(value, str):
                         combined_text += f"{value}. "
                     elif isinstance(value, dict) and 'data' in value:
                         current_text = value['data'].get('text', '')
-                        combined_text += f"{current_text}"
+                        combined_text += f"{current_text}. "
             
-            logger.info(f"🧐 Analyzing Text: {combined_text[:50]}...")
-            
-            try:
-                request_options = AnalyzeTextOptions(text=combined_text[:1000])
-                result = client.analyze_text(request_options)
-                violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=2)
-            except HttpResponseError as e:
-                 logger.error(f"Azure Text API Failed: {e}")
+            # Only analyze if text exists
+            if combined_text.strip():
+                logger.info(f"🧐 Analyzing Text: {combined_text[:50]}...")
+                try:
+                    request_options = AnalyzeTextOptions(text=combined_text[:1000])
+                    result = client.analyze_text(request_options)
+                    violation_found, reason_msg = analyze_severity(result.categories_analysis, block_level=4) # Level 4 for text
+                except HttpResponseError as e:
+                     logger.error(f"Azure Text API Failed: {e}")
 
         # ==========================================
         # 🏁 RETURN DECISION
@@ -162,22 +172,20 @@ async def handle_webhook(request: Request):
             logger.warning(f"🚫 BLOCKED: {reason_msg}")
             return {
                 "isMatchingCondition": True,
-                "confidence": 100,
+                "confidence": 0.95,
                 "reason": reason_msg
             }
         
         logger.info("✅ Safe")
         return {
             "isMatchingCondition": False,
-            "confidence": 0,
+            "confidence": 0.98,
             "reason": "Safe"
         }
 
     except Exception as e:
         logger.error(f"❌ Critical Error: {e}")
-        # Fail Open to prevent blocking good users on error
         return {"isMatchingCondition": False}
 
 if __name__ == "__main__":
-    # Use 10000 for Render, or 5000 for local testing
     uvicorn.run(app, host="0.0.0.0", port=10000)
