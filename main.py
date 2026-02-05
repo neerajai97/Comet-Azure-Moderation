@@ -48,14 +48,35 @@ async def handle_webhook(request: Request):
         last_entry = context_list[-1]
         logger.info(f"📨 Last Entry: {last_entry}")
         
-        current_msg_val = next(iter(last_entry.values()))
+        # CometChat sends different formats:
+        # Text: {"sender_uid": "text"} or {"sender_uid": {"type": "text", "data": {...}}}
+        # Media: {"name": "...", "mimeType": "image/png", "url": "https://..."}
+        
+        # Check if it's a media message (has mimeType/url fields)
+        if 'mimeType' in last_entry or 'url' in last_entry:
+            current_msg_val = last_entry  # Use the entire object
+        else:
+            current_msg_val = next(iter(last_entry.values()))  # Extract sender's message
 
         # DEBUG: Log the actual message structure
         logger.info(f"🔍 Raw message structure: {current_msg_val}")
 
-        # Determine message type from the CURRENT message
+        # Determine message type
         msg_type = 'text'
-        if isinstance(current_msg_val, dict):
+        
+        # Check for media type via mimeType
+        if isinstance(current_msg_val, dict) and 'mimeType' in current_msg_val:
+            mime = current_msg_val.get('mimeType', '')
+            if mime.startswith('image/'):
+                msg_type = 'image'
+            elif mime.startswith('video/'):
+                msg_type = 'video'
+            elif mime.startswith('audio/'):
+                msg_type = 'audio'
+            else:
+                msg_type = 'file'
+        # Check for structured message with type field
+        elif isinstance(current_msg_val, dict) and 'type' in current_msg_val:
             msg_type = current_msg_val.get('type', 'text')
 
         logger.info(f"🔍 Message Type: {msg_type} | Context Window: {len(context_list)} messages")
@@ -67,7 +88,8 @@ async def handle_webhook(request: Request):
         # 📷 IMAGE MODERATION (Current Image Only)
         # ==========================================
         if msg_type == 'image' and isinstance(current_msg_val, dict):
-            image_url = current_msg_val.get('data', {}).get('url')
+            # Handle both formats: {"url": "..."} or {"data": {"url": "..."}}
+            image_url = current_msg_val.get('url') or current_msg_val.get('data', {}).get('url')
 
             if image_url:
                 logger.info(f"📷 Analyzing Image: {image_url}")
